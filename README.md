@@ -2,19 +2,19 @@
 
 Check available rooms at the University of Jyväskylä.
 
-## Features ✨
-
-- 🗺️ Browse rooms by campus and building
-- 📅 Check all building rooms availability for a specific date and time
-- 🔍 Search rooms by name or type
-- 📍 View building location on map
-
 ## How to Use 🚀
 
 1. Select a campus (optional) and building
 2. Choose date, time and duration
 3. Click "Check Availability" to see which rooms are free
 4. Click "Reserve" to book a room through JYU's calendar system
+
+## Features ✨
+
+- 🗺️ Browse rooms by campus and building
+- 📅 Check all building rooms availability for a specific date and time
+- 🔍 Search rooms by name or type
+- 📍 View building location on map
 
 ## Development Setup 🛠️
 

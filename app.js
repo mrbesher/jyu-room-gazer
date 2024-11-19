@@ -1,3 +1,12 @@
+function getLanguage() {
+  const params = new URLSearchParams(window.location.search);
+  const urlLang = params.get("lang");
+  if (urlLang === "fi" || urlLang === "en") {
+    return urlLang;
+  }
+  return navigator.language.startsWith("fi") ? "fi" : "en";
+}
+
 // ============= State Management =============
 const AppState = {
   buildings: [],
@@ -8,6 +17,7 @@ const AppState = {
   map: null,
   markers: [],
   selectedMarker: null,
+  currentLanguage: getLanguage(),
 
   setState(updates) {
     Object.assign(this, updates);
@@ -24,9 +34,125 @@ const AppState = {
   notifyListeners() {
     this.listeners.forEach((listener) => listener());
   },
+
+  toggleLanguage() {
+    this.currentLanguage = this.currentLanguage === "en" ? "fi" : "en";
+
+    // Reprocess buildings and spaces with new language
+    const { processedBuildings, processedSpaces } =
+      DataProcessor.reprocessWithNewLanguage();
+
+    // Keep track of currently selected building
+    const selectedBuildingId = document.getElementById("buildingSelect").value;
+
+    // Update state with newly processed data
+    this.setState({
+      buildings: processedBuildings,
+      spaces: processedSpaces,
+      // Update filtered spaces while maintaining the current building filter
+      filteredSpaces: processedSpaces.filter((space) =>
+        this.filteredSpaces.some((fs) => fs.spaceLabel === space.spaceLabel),
+      ),
+    });
+
+    // Update UI
+    this.notifyListeners();
+    this.updateUILanguage();
+
+    // Refresh building select and spaces display
+    UIController.populateSelects();
+
+    // Restore building selection if there was one
+    if (selectedBuildingId) {
+      document.getElementById("buildingSelect").value = selectedBuildingId;
+    }
+
+    if (this.filteredSpaces.length > 0) {
+      UIController.renderSpaces(this.filteredSpaces);
+    }
+  },
+
+  updateUILanguage() {
+    const t = Translations[this.currentLanguage];
+
+    // Update static text elements
+    document.querySelector("h1").textContent = t.title;
+    document
+      .getElementById("campusSelect")
+      .querySelector("option").textContent = t.selectCampus;
+    document
+      .getElementById("buildingSelect")
+      .querySelector("option").textContent = t.selectBuilding;
+    document.getElementById("checkAvailability").textContent =
+      t.checkAvailability;
+    document.getElementById("searchInput").placeholder = t.searchSpaces;
+    document.getElementById("googleMapsLink").textContent = t.viewOnGoogleMaps;
+
+    // Update legend
+    document.querySelectorAll("#colorLegend span").forEach((span, index) => {
+      span.textContent = [t.smallCapacity, t.mediumCapacity, t.largeCapacity][
+        index
+      ];
+    });
+
+    UIController.createDurationSelect();
+    // Re-render spaces with new language
+    if (AppState.filteredSpaces.length > 0) {
+      UIController.renderSpaces(AppState.filteredSpaces);
+    }
+  },
 };
 
 let mapController;
+
+const Translations = {
+  en: {
+    title: "JYU Room Gazer",
+    selectCampus: "Select Campus (Optional)",
+    selectBuilding: "Select Building",
+    checkAvailability: "Check Availability",
+    searchSpaces: "Search spaces...",
+    loading: "Loading spaces...",
+    smallCapacity: "Small capacity (<10)",
+    mediumCapacity: "Medium capacity (<30)",
+    largeCapacity: "Large capacity (≥30)",
+    available: "Available for selected time",
+    notAvailable: "Not available for selected time",
+    checkAvailabilityText: "Check availability",
+    capacity: "Capacity",
+    area: "Area",
+    reserve: "Reserve",
+    viewOnGoogleMaps: "View on Google Maps",
+    duration: "Duration",
+    minutes: "minutes",
+    hour: "hour",
+    hours: "hours",
+    unnamedSpace: "Unnamed Space",
+  },
+  fi: {
+    title: "JYU Room Gazer",
+    selectCampus: "Valitse kampus (Valinnainen)",
+    selectBuilding: "Valitse rakennus",
+    checkAvailability: "Tarkista saatavuus",
+    searchSpaces: "Etsi tiloja...",
+    loading: "Ladataan tiloja...",
+    smallCapacity: "Pieni kapasiteetti (<10)",
+    mediumCapacity: "Keskikokoinen kapasiteetti (<30)",
+    largeCapacity: "Suuri kapasiteetti (≥30)",
+    available: "Saatavilla valittuna aikana",
+    notAvailable: "Ei saatavilla valittuna aikana",
+    checkAvailabilityText: "Tarkista saatavuus",
+    capacity: "Kapasiteetti",
+    area: "Pinta-ala",
+    reserve: "Varaa",
+    viewOnGoogleMaps: "Näytä Google Mapsissa",
+    duration: "Kesto",
+    minutes: "minuuttia",
+    hour: "tunti",
+    hours: "tuntia",
+    unnamedSpace: "Nimetön tila",
+  },
+};
 
 // ============= API Service =============
 class APIService {
@@ -123,10 +249,15 @@ class DataProcessor {
     const { buildings, floors, spaces, config } = data;
 
     const locationMap = new Map(config.locations.map((loc) => [loc.id, loc]));
-
     const categoryMap = new Map(
       (config.spaceCategoryTranslations || []).map((cat) => [cat.id, cat]),
     );
+
+    // Store full location and category data in AppState for later use
+    AppState.setState({
+      locationTranslations: config.locations,
+      categoryTranslations: config.spaceCategoryTranslations || [],
+    });
 
     const buildingIcons = new Map(
       config.locations
@@ -135,7 +266,11 @@ class DataProcessor {
     );
 
     // First process spaces to use for building filtering
-    const processedSpaces = this.processSpaces(spaces, categoryMap);
+    const processedSpaces = this.processSpaces(
+      spaces,
+      categoryMap,
+      AppState.currentLanguage,
+    );
 
     // Get building IDs that have valid spaces
     const buildingsWithSpaces = new Set(
@@ -156,7 +291,9 @@ class DataProcessor {
           ? {
               ...building,
               name:
-                configLocation.name?.valueEn ||
+                configLocation.name?.[
+                  AppState.currentLanguage === "fi" ? "valueFi" : "valueEn"
+                ] ||
                 building.name ||
                 "Unnamed Building",
               latitude:
@@ -198,13 +335,12 @@ class DataProcessor {
       .sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  static processSpaces(spaces, categoryMap) {
+  static processSpaces(spaces, categoryMap, language = "en") {
     const validSpaceCategories = ["31", "214", "33"];
     const validExtensionIds = [4200042, 4100003];
 
     return spaces
       .map((space) => {
-        // Get translations for both category and extension
         const categoryTranslation = categoryMap.get(
           space.spaceCategory?.custNumber,
         );
@@ -217,13 +353,17 @@ class DataProcessor {
           spaceCategory: categoryTranslation
             ? {
                 ...space.spaceCategory,
-                name: categoryTranslation.name.valueEn,
+                name: categoryTranslation.name[
+                  language === "fi" ? "valueFi" : "valueEn"
+                ],
               }
             : space.spaceCategory,
           spaceCategoryExtension: extensionTranslation
             ? {
                 ...space.spaceCategoryExtension,
-                name: extensionTranslation.name.valueEn,
+                name: extensionTranslation.name[
+                  language === "fi" ? "valueFi" : "valueEn"
+                ],
               }
             : space.spaceCategoryExtension,
         };
@@ -235,6 +375,58 @@ class DataProcessor {
           (validSpaceCategories.includes(space.spaceCategory?.custNumber) ||
             validExtensionIds.includes(space.spaceCategoryExtension?.id)),
       );
+  }
+
+  static reprocessWithNewLanguage() {
+    // Reprocess buildings
+    const processedBuildings = AppState.buildings.map((building) => {
+      const configLocation = AppState.locationTranslations.find(
+        (loc) => loc.id === building.id,
+      );
+      return configLocation
+        ? {
+            ...building,
+            name:
+              configLocation.name?.[
+                AppState.currentLanguage === "fi" ? "valueFi" : "valueEn"
+              ] ||
+              building.name ||
+              "Unnamed Building",
+          }
+        : building;
+    });
+
+    // Reprocess spaces
+    const processedSpaces = AppState.spaces.map((space) => {
+      const categoryTranslation = AppState.categoryTranslations.find(
+        (cat) => cat.id === space.spaceCategory?.custNumber,
+      );
+      const extensionTranslation = AppState.categoryTranslations.find(
+        (cat) => cat.id === space.spaceCategoryExtension?.id?.toString(),
+      );
+
+      return {
+        ...space,
+        spaceCategory: categoryTranslation
+          ? {
+              ...space.spaceCategory,
+              name: categoryTranslation.name[
+                AppState.currentLanguage === "fi" ? "valueFi" : "valueEn"
+              ],
+            }
+          : space.spaceCategory,
+        spaceCategoryExtension: extensionTranslation
+          ? {
+              ...space.spaceCategoryExtension,
+              name: extensionTranslation.name[
+                AppState.currentLanguage === "fi" ? "valueFi" : "valueEn"
+              ],
+            }
+          : space.spaceCategoryExtension,
+      };
+    });
+
+    return { processedBuildings, processedSpaces };
   }
 }
 
@@ -464,18 +656,19 @@ class UIController {
   }
 
   static createDurationSelect() {
+    const t = Translations[AppState.currentLanguage];
     const select = document.createElement("select");
     select.id = "durationSelect";
     select.className = "w-full p-2 border rounded-lg bg-white shadow-sm";
 
     const options = [
-      '<option value="30">30 minutes</option>',
+      `<option value="30">30 ${t.minutes}</option>`,
       ...Array.from({ length: 12 }, (_, i) => {
         const hour = i + 1;
         return [
-          `<option value="${hour * 60}">${hour} hour${hour > 1 ? "s" : ""}</option>`,
+          `<option value="${hour * 60}">${hour} ${hour > 1 ? t.hours : t.hour}</option>`,
           hour < 12
-            ? `<option value="${hour * 60 + 30}">${hour}:30 hours</option>`
+            ? `<option value="${hour * 60 + 30}">${hour}:30 ${t.hours}</option>`
             : "",
         ];
       }).flat(),
@@ -508,6 +701,10 @@ class UIController {
     document
       .getElementById("checkAvailability")
       .addEventListener("click", () => this.handleAvailabilityCheck());
+
+    document.getElementById("languageToggle").addEventListener("click", () => {
+      AppState.toggleLanguage();
+    });
   }
 
   static populateSelects() {
@@ -516,24 +713,26 @@ class UIController {
   }
 
   static populateCampusSelect() {
+    const t = Translations[AppState.currentLanguage];
     const campusSelect = document.getElementById("campusSelect");
     const campuses = [...new Set(AppState.buildings.map((b) => b.campus))];
 
     campusSelect.innerHTML =
-      '<option value="">Select Campus (Optional)</option>' +
+      `<option value="">${t.selectCampus}</option>` +
       campuses
         .map((campus) => `<option value="${campus}">${campus}</option>`)
         .join("");
   }
 
   static populateBuildingSelect(campus) {
+    const t = Translations[AppState.currentLanguage];
     const buildingSelect = document.getElementById("buildingSelect");
     const filteredBuildings = campus
       ? AppState.buildings.filter((b) => b.campus === campus)
       : AppState.buildings;
 
     buildingSelect.innerHTML =
-      '<option value="">Select Building</option>' +
+      `<option value="">${t.selectBuilding}</option>` +
       filteredBuildings
         .map(
           (building) =>
@@ -655,6 +854,7 @@ class UIController {
   }
 
   static renderSpaces(spaces) {
+    const t = Translations[AppState.currentLanguage];
     const sortedSpaces = [...spaces].sort((a, b) => {
       if (a.isAvailable === b.isAvailable) {
         return (a.spaceLabel || "").localeCompare(b.spaceLabel || "");
@@ -666,99 +866,101 @@ class UIController {
     grid.innerHTML = sortedSpaces
       .map(
         (space) => `
-      <div class="card bg-white rounded-lg overflow-hidden border ${
-        space.isAvailable === true
-          ? "border-green-200"
-          : space.isAvailable === false
-            ? "border-red-200"
-            : "border-gray-200"
-      }">
-        <div class="bg-gray-50 border-b p-4 ${
+        <div class="card bg-white rounded-lg overflow-hidden border ${
           space.isAvailable === true
-            ? "bg-green-50"
+            ? "border-green-200"
             : space.isAvailable === false
-              ? "bg-red-50"
-              : ""
+              ? "border-red-200"
+              : "border-gray-200"
         }">
-          <div class="flex items-center justify-between">
-            <h3 class="font-semibold overflow-hidden text-ellipsis whitespace-nowrap max-w-[200px]">
-              ${space.spaceLabel || "Unnamed Space"}
-              ${space.name ? `(${space.name})` : ""}
-            </h3>
-            <div class="flex items-center gap-2">
-              <i class="fas fa-users ${UIUtils.getCapacityColor(space.capacity)}"></i>
-              <a href="https://kovs-calendar.app.jyu.fi/room/${encodeURIComponent(
-                space.spaceLabel,
-              )}?date=${document.getElementById("dateSelect").value}&lang=en"
-                target="_blank"
-                class="text-xs text-gray-500 hover:text-blue-600 hover:underline">
-                <i class="fas fa-external-link-alt"></i>
-                Reserve
-              </a>
+          <div class="bg-gray-50 border-b p-4 ${
+            space.isAvailable === true
+              ? "bg-green-50"
+              : space.isAvailable === false
+                ? "bg-red-50"
+                : ""
+          }">
+            <div class="flex items-center justify-between">
+              <h3 class="font-semibold overflow-hidden text-ellipsis whitespace-nowrap max-w-[200px]">
+                ${space.spaceLabel || t.unnamedSpace}
+                ${space.name ? `(${space.name})` : ""}
+              </h3>
+              <div class="flex items-center gap-2">
+                <i class="fas fa-users ${UIUtils.getCapacityColor(space.capacity)}"></i>
+                <a href="https://kovs-calendar.app.jyu.fi/room/${encodeURIComponent(
+                  space.spaceLabel,
+                )}?date=${document.getElementById("dateSelect").value}&lang=${
+                  AppState.currentLanguage
+                }"
+                  target="_blank"
+                  class="text-xs text-gray-500 hover:text-blue-600 hover:underline">
+                  <i class="fas fa-external-link-alt"></i>
+                  ${t.reserve}
+                </a>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="p-4 space-y-2">
-          <div class="flex items-center text-sm ${
-            space.isAvailable === true
-              ? "status-available"
-              : space.isAvailable === false
-                ? "status-unavailable"
-                : "status-unknown"
-          } p-2 rounded">
-            <i class="fas ${
+          <div class="p-4 space-y-2">
+            <div class="flex items-center text-sm ${
               space.isAvailable === true
-                ? "fa-check"
+                ? "status-available"
                 : space.isAvailable === false
-                  ? "fa-times"
-                  : "fa-question"
-            } mr-2"></i>
-            <span>${
-              space.isAvailable === true
-                ? "Available for selected time"
-                : space.isAvailable === false
-                  ? "Not available for selected time"
-                  : "Check availability"
-            }</span>
+                  ? "status-unavailable"
+                  : "status-unknown"
+            } p-2 rounded">
+              <i class="fas ${
+                space.isAvailable === true
+                  ? "fa-check"
+                  : space.isAvailable === false
+                    ? "fa-times"
+                    : "fa-question"
+              } mr-2"></i>
+              <span>${
+                space.isAvailable === true
+                  ? t.available
+                  : space.isAvailable === false
+                    ? t.notAvailable
+                    : t.checkAvailabilityText
+              }</span>
+            </div>
+            ${
+              space.spaceCategory?.name || space.spaceCategoryExtension?.name
+                ? `
+                <div class="flex items-center text-sm text-gray-600">
+                  <i class="fas fa-building mr-2"></i>
+                  <span>${space.spaceCategory?.name || ""}${
+                    space.spaceCategory?.name &&
+                    space.spaceCategoryExtension?.name
+                      ? " / "
+                      : ""
+                  }${space.spaceCategoryExtension?.name || ""}</span>
+                </div>
+                `
+                : ""
+            }
+            ${
+              space.capacity > 0
+                ? `
+                <div class="flex items-center text-sm text-gray-600">
+                  <i class="fas fa-users mr-2"></i>
+                  <span>${t.capacity}: ${space.capacity}</span>
+                </div>
+                `
+                : ""
+            }
+            ${
+              space.rentableArea > 0
+                ? `
+                <div class="flex items-center text-sm text-gray-600">
+                  <i class="fas fa-ruler-combined mr-2"></i>
+                  <span>${t.area}: ${Math.round(space.rentableArea)}m²</span>
+                </div>
+                `
+                : ""
+            }
           </div>
-          ${
-            space.spaceCategory?.name || space.spaceCategoryExtension?.name
-              ? `
-              <div class="flex items-center text-sm text-gray-600">
-                <i class="fas fa-building mr-2"></i>
-                <span>${space.spaceCategory?.name || ""}${
-                  space.spaceCategory?.name &&
-                  space.spaceCategoryExtension?.name
-                    ? " / "
-                    : ""
-                }${space.spaceCategoryExtension?.name || ""}</span>
-              </div>
-              `
-              : ""
-          }
-          ${
-            space.capacity > 0
-              ? `
-              <div class="flex items-center text-sm text-gray-600">
-                <i class="fas fa-users mr-2"></i>
-                <span>Capacity: ${space.capacity}</span>
-              </div>
-              `
-              : ""
-          }
-          ${
-            space.rentableArea > 0
-              ? `
-              <div class="flex items-center text-sm text-gray-600">
-                <i class="fas fa-ruler-combined mr-2"></i>
-                <span>Area: ${Math.round(space.rentableArea)}m²</span>
-              </div>
-              `
-              : ""
-          }
         </div>
-      </div>
-    `,
+      `,
       )
       .join("");
   }
@@ -791,6 +993,8 @@ class App {
         floors: processedData.floors,
         buildingIcons: processedData.buildingIcons,
       });
+
+      AppState.updateUILanguage();
 
       console.log("📍 Updating map markers");
       mapController.updateMarkers();

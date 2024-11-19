@@ -59,6 +59,9 @@ const AppState = {
     this.notifyListeners();
     this.updateUILanguage();
 
+    // Update markers
+    mapController.updateMarkersForLanguage();
+
     // Refresh building select and spaces display
     UIController.populateSelects();
 
@@ -611,6 +614,17 @@ class MapController {
       AppState.selectedMarker = newSelectedMarker;
       AppState.map.setView([building.latitude, building.longitude], 16);
     }
+  }
+
+  updateMarkersForLanguage() {
+    AppState.markers.forEach((marker) => {
+      const building = AppState.buildings.find(
+        (b) => b.id === marker.buildingId,
+      );
+      if (building) {
+        marker.setPopupContent(`<b>${building.name}</b><br>${building.campus}`);
+      }
+    });
   }
 }
 

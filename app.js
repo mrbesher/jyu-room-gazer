@@ -36,26 +36,32 @@ const AppState = {
   },
 
   toggleLanguage() {
+    // Store current UI state before language change
+    const currentState = {
+      selectedCampus: document.getElementById("campusSelect").value,
+      selectedBuilding: document.getElementById("buildingSelect").value,
+      selectedDate: document.getElementById("dateSelect").value,
+      selectedTime: document.getElementById("timeSelect").value,
+      selectedDuration: document.getElementById("durationSelect").value,
+      searchTerm: document.getElementById("searchInput").value,
+    };
+
     this.currentLanguage = this.currentLanguage === "en" ? "fi" : "en";
 
     // Reprocess buildings and spaces with new language
     const { processedBuildings, processedSpaces } =
       DataProcessor.reprocessWithNewLanguage();
 
-    // Keep track of currently selected building
-    const selectedBuildingId = document.getElementById("buildingSelect").value;
-
     // Update state with newly processed data
     this.setState({
       buildings: processedBuildings,
       spaces: processedSpaces,
-      // Update filtered spaces while maintaining the current building filter
       filteredSpaces: processedSpaces.filter((space) =>
         this.filteredSpaces.some((fs) => fs.spaceLabel === space.spaceLabel),
       ),
     });
 
-    // Update UI
+    // Update UI with new language
     this.notifyListeners();
     this.updateUILanguage();
 
@@ -65,11 +71,37 @@ const AppState = {
     // Refresh building select and spaces display
     UIController.populateSelects();
 
-    // Restore building selection if there was one
-    if (selectedBuildingId) {
-      document.getElementById("buildingSelect").value = selectedBuildingId;
+    // Restore previous UI state
+    if (currentState.selectedCampus) {
+      document.getElementById("campusSelect").value =
+        currentState.selectedCampus;
+      UIController.populateBuildingSelect(currentState.selectedCampus);
     }
 
+    if (currentState.selectedBuilding) {
+      document.getElementById("buildingSelect").value =
+        currentState.selectedBuilding;
+    }
+
+    if (currentState.selectedDuration) {
+      document.getElementById("durationSelect").value =
+        currentState.selectedDuration;
+    }
+
+    if (currentState.selectedDate) {
+      document.getElementById("dateSelect").value = currentState.selectedDate;
+    }
+
+    if (currentState.selectedTime) {
+      document.getElementById("timeSelect").value = currentState.selectedTime;
+    }
+
+    if (currentState.searchTerm) {
+      document.getElementById("searchInput").value = currentState.searchTerm;
+      UIController.handleSearch(currentState.searchTerm);
+    }
+
+    // Re-render spaces if any were displayed
     if (this.filteredSpaces.length > 0) {
       UIController.renderSpaces(this.filteredSpaces);
     }

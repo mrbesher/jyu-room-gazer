@@ -6,6 +6,7 @@ let filteredSpaces = [];
 let map;
 let currentMarkers = [];
 let selectedMarker = null;
+let buildingIcons = new Map();
 
 // Initialize date constraints
 function initializeDatePicker() {
@@ -127,21 +128,60 @@ function timeToMinutes(time) {
   return hours * 60 + minutes;
 }
 
-function createDefaultIcon() {
+function createDefaultIcon(buildingId) {
+  const iconText = buildingIcons.get(buildingId) || "•";
   return L.divIcon({
     className: "custom-div-icon",
-    html: `<div style="background-color: #3B82F6; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white;"></div>`,
-    iconSize: [12, 12],
-    iconAnchor: [6, 6],
+    html: `<div style="
+      background-color: #3B82F6;
+      min-width: 24px;
+      min-height: 24px;
+      width: auto;
+      padding: 0 4px;
+      border-radius: 999px;
+      border: 2px solid white;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-weight: 600;
+      font-size: 10px;
+      font-family: system-ui, -apple-system, sans-serif;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+      ">${iconText}</div>`,
+    iconSize: null, // Remove fixed size constraint
+    iconAnchor: [12, 12],
   });
 }
 
-function createSelectedIcon() {
+function createSelectedIcon(buildingId) {
+  const iconText = buildingIcons.get(buildingId) || "•";
   return L.divIcon({
     className: "custom-div-icon",
-    html: `<div style="background-color: #DC2626; width: 16px; height: 16px; border-radius: 50%; border: 2px solid white;"></div>`,
-    iconSize: [16, 16],
-    iconAnchor: [8, 8],
+    html: `<div style="
+      background-color: #DC2626;
+      min-width: 28px;
+      min-height: 28px;
+      width: auto;
+      padding: 0 5px;
+      border-radius: 999px;
+      border: 2px solid white;
+      box-shadow: 0 3px 6px rgba(0,0,0,0.25);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-weight: 600;
+      font-size: 10px;
+      font-family: system-ui, -apple-system, sans-serif;
+      transition: all 0.2s ease;
+      transform: scale(1.05);
+      white-space: nowrap;
+      ">${iconText}</div>`,
+    iconSize: null, // Remove fixed size constraint
+    iconAnchor: [14, 14],
   });
 }
 
@@ -194,15 +234,14 @@ function updateMap(latitude, longitude, name, address, buildingId) {
 
   // Update marker highlighting
   if (selectedMarker) {
-    selectedMarker.setIcon(createDefaultIcon());
+    selectedMarker.setIcon(createDefaultIcon(selectedMarker.buildingId));
   }
 
-  // Find and highlight the new selected marker
   const newSelectedMarker = currentMarkers.find(
     (m) => m.buildingId === buildingId,
   );
   if (newSelectedMarker) {
-    newSelectedMarker.setIcon(createSelectedIcon());
+    newSelectedMarker.setIcon(createSelectedIcon(buildingId));
     selectedMarker = newSelectedMarker;
   }
 }
@@ -279,13 +318,26 @@ async function checkAllSpacesAvailability() {
   }
 }
 
-// Fetch and process data
+function getBuildingsWithSpaces() {
+  // Get all building IDs that have valid spaces
+  const buildingIdsWithSpaces = new Set();
+
+  allSpaces.forEach((space) => {
+    const floor = allFloors.find((f) => f.id === space.floorId);
+    if (floor) {
+      buildingIdsWithSpaces.add(floor.buildingId);
+    }
+  });
+
+  // Filter buildings array to only include buildings with spaces
+  return buildings.filter((building) => buildingIdsWithSpaces.has(building.id));
+}
+
 async function fetchBuildings(retryCount = 3, timeout = 5000) {
   try {
     showLoading();
     hideError();
 
-    // Helper function to fetch with timeout and retry
     const fetchWithTimeout = async (url, attempts = retryCount) => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeout);
@@ -311,7 +363,7 @@ async function fetchBuildings(retryCount = 3, timeout = 5000) {
       }
     };
 
-    // Fetch all data with retry logic
+    // 1. Fetch all data
     const endpoints = [
       "https://navi.jyu.fi/api/buildings",
       "https://navi.jyu.fi/api/floors",
@@ -319,24 +371,19 @@ async function fetchBuildings(retryCount = 3, timeout = 5000) {
       "https://navi.jyu.fi/api/config",
     ];
 
-    const responses = await Promise.all(
-      endpoints.map((url) => fetchWithTimeout(url)),
-    ).catch((error) => {
-      throw new Error(`Failed to fetch data: ${error.message}`);
-    });
+    const [buildingsResponse, floorsResponse, spacesResponse, configResponse] =
+      await Promise.all(endpoints.map((url) => fetchWithTimeout(url)));
 
+    // 2. Parse JSON responses
     const [buildingsData, floorsData, spacesData, configData] =
-      await Promise.all(
-        responses.map(async (response) => {
-          try {
-            return await response.json();
-          } catch (error) {
-            throw new Error(`Failed to parse JSON: ${error.message}`);
-          }
-        }),
-      );
+      await Promise.all([
+        buildingsResponse.json(),
+        floorsResponse.json(),
+        spacesResponse.json(),
+        configResponse.json(),
+      ]);
 
-    // Validate received data
+    // 3. Validate data structure
     if (
       !buildingsData?.items ||
       !floorsData?.items ||
@@ -346,30 +393,26 @@ async function fetchBuildings(retryCount = 3, timeout = 5000) {
       throw new Error("Invalid data structure received from API");
     }
 
-    // Store all data
-    buildings = buildingsData.items;
-    allFloors = floorsData.items;
-
-    const validSpaceCategories = ["31", "214", "33"];
-    const validExtensionIds = [4200042, 4100003];
-
-    // Create maps with null checks
+    // 4. Create utility maps
     const locationMap = new Map(
-      (configData.locations || []).map((loc) => [loc.id, loc]),
+      configData.locations.map((loc) => [loc.id, loc]),
     );
-
     const categoryMap = new Map(
       (configData.spaceCategoryTranslations || []).map((cat) => [cat.id, cat]),
     );
+    buildingIcons = new Map(
+      configData.locations
+        .filter((location) => location.icon?.text)
+        .map((location) => [location.id, location.icon.text]),
+    );
 
-    // Process buildings with error handling
+    // 5. Process buildings
     buildings = buildingsData.items
-      .filter((building) => building && building.id) // Filter out invalid buildings
+      .filter((building) => building && building.id)
       .map((building) => {
-        try {
-          const configLocation = locationMap.get(building.id);
-          if (configLocation) {
-            return {
+        const configLocation = locationMap.get(building.id);
+        return configLocation
+          ? {
               ...building,
               name:
                 configLocation.name?.valueEn ||
@@ -379,29 +422,29 @@ async function fetchBuildings(retryCount = 3, timeout = 5000) {
                 configLocation.coordinates?.latitude || building.latitude,
               longitude:
                 configLocation.coordinates?.longitude || building.longitude,
-            };
-          }
-          return building;
-        } catch (error) {
-          console.error(`Error processing building ${building.id}:`, error);
-          return building;
-        }
-      });
+            }
+          : building;
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
 
-    // Enhance spaces with translated categories
+    // 6. Process floors and spaces
+    allFloors = floorsData.items;
+
+    const validSpaceCategories = ["31", "214", "33"];
+    const validExtensionIds = [4200042, 4100003];
+
     allSpaces = spacesData.items
       .map((space) => {
         const category = categoryMap.get(space.spaceCategory?.custNumber);
-        if (category) {
-          return {
-            ...space,
-            spaceCategory: {
-              ...space.spaceCategory,
-              name: category.name.valueEn,
-            },
-          };
-        }
-        return space;
+        return category
+          ? {
+              ...space,
+              spaceCategory: {
+                ...space.spaceCategory,
+                name: category.name.valueEn,
+              },
+            }
+          : space;
       })
       .filter(
         (space) =>
@@ -411,31 +454,31 @@ async function fetchBuildings(retryCount = 3, timeout = 5000) {
             validExtensionIds.includes(space.spaceCategoryExtension?.id)),
       );
 
-    buildings.sort((a, b) => a.name.localeCompare(b.name));
-
-    // Initialize map
+    // 7. Initialize and update map
     if (!map) {
-      map = L.map("map").setView([62.2315, 25.7355], 13); // Centered on Jyväskylä
+      map = L.map("map").setView([62.2315, 25.7355], 13);
       L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         attribution: "&copy; OpenStreetMap contributors",
       }).addTo(map);
     }
+
+    buildings = getBuildingsWithSpaces();
 
     // Clear existing markers
     currentMarkers.forEach((marker) => marker.remove());
     currentMarkers = [];
     selectedMarker = null;
 
-    // Add markers for all buildings
+    // Add new markers
     buildings.forEach((building) => {
       if (building.latitude && building.longitude) {
         const marker = L.marker([building.latitude, building.longitude], {
-          icon: createDefaultIcon(),
+          icon: createDefaultIcon(building.id),
         })
           .bindPopup(`<b>${building.name}</b><br>${building.campus}`)
           .addTo(map);
 
-        marker.buildingId = building.id; // Store building ID with marker
+        marker.buildingId = building.id;
 
         marker.on("click", () => {
           const selectedCampus = document.getElementById("campusSelect").value;
@@ -449,6 +492,7 @@ async function fetchBuildings(retryCount = 3, timeout = 5000) {
       }
     });
 
+    // 8. Update UI
     document.getElementById("mapContainer").classList.remove("hidden");
     setTimeout(() => map.invalidateSize(), 100);
     document.getElementById("googleMapsLink").classList.add("hidden");

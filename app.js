@@ -4,6 +4,8 @@ let allSpaces = [];
 let allFloors = [];
 let filteredSpaces = [];
 let map;
+let currentMarkers = [];
+let selectedMarker = null;
 
 // Initialize date constraints
 function initializeDatePicker() {
@@ -125,7 +127,52 @@ function timeToMinutes(time) {
   return hours * 60 + minutes;
 }
 
-function updateMap(latitude, longitude, name, address) {
+function createDefaultIcon() {
+  return L.divIcon({
+    className: "custom-div-icon",
+    html: `<div style="background-color: #3B82F6; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white;"></div>`,
+    iconSize: [12, 12],
+    iconAnchor: [6, 6],
+  });
+}
+
+function createSelectedIcon() {
+  return L.divIcon({
+    className: "custom-div-icon",
+    html: `<div style="background-color: #DC2626; width: 16px; height: 16px; border-radius: 50%; border: 2px solid white;"></div>`,
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+  });
+}
+
+function filterMarkersByCampus(campus) {
+  currentMarkers.forEach((marker) => {
+    const building = buildings.find((b) => b.id === marker.buildingId);
+    if (!campus || building.campus === campus) {
+      marker.addTo(map);
+    } else {
+      marker.remove();
+    }
+  });
+
+  // If a campus is selected, fit the map bounds to show all visible markers
+  if (campus) {
+    const visibleMarkers = currentMarkers.filter((marker) => {
+      const building = buildings.find((b) => b.id === marker.buildingId);
+      return building.campus === campus;
+    });
+
+    if (visibleMarkers.length > 0) {
+      const bounds = L.featureGroup(visibleMarkers).getBounds();
+      map.fitBounds(bounds, { padding: [50, 50] });
+    }
+  } else {
+    // If no campus is selected, show all of Jyväskylä
+    map.setView([62.2315, 25.7355], 13);
+  }
+}
+
+function updateMap(latitude, longitude, name, address, buildingId) {
   const mapContainer = document.getElementById("mapContainer");
   mapContainer.classList.remove("hidden");
 
@@ -140,15 +187,24 @@ function updateMap(latitude, longitude, name, address) {
     map.setView([latitude, longitude], 15);
   }
 
-  // Clear existing markers and add a new one
-  L.marker([latitude, longitude])
-    .addTo(map)
-    .bindPopup(`<b>${name}</b><br>${address}`)
-    .openPopup();
-
   // Update Google Maps link
   const googleMapsLink = document.getElementById("googleMapsLink");
   googleMapsLink.href = `https://www.google.com/maps?q=${latitude},${longitude}`;
+  googleMapsLink.classList.remove("hidden");
+
+  // Update marker highlighting
+  if (selectedMarker) {
+    selectedMarker.setIcon(createDefaultIcon());
+  }
+
+  // Find and highlight the new selected marker
+  const newSelectedMarker = currentMarkers.find(
+    (m) => m.buildingId === buildingId,
+  );
+  if (newSelectedMarker) {
+    newSelectedMarker.setIcon(createSelectedIcon());
+    selectedMarker = newSelectedMarker;
+  }
 }
 
 // Parse the HTML response to get availability data
@@ -224,24 +280,71 @@ async function checkAllSpacesAvailability() {
 }
 
 // Fetch and process data
-async function fetchBuildings() {
+async function fetchBuildings(retryCount = 3, timeout = 5000) {
   try {
     showLoading();
     hideError();
 
-    // Fetch all data in parallel
-    const [buildingsResponse, floorsResponse, spacesResponse] =
-      await Promise.all([
-        fetch("https://navi.jyu.fi/api/buildings"),
-        fetch("https://navi.jyu.fi/api/floors"),
-        fetch("https://navi.jyu.fi/api/spaces"),
-      ]);
+    // Helper function to fetch with timeout and retry
+    const fetchWithTimeout = async (url, attempts = retryCount) => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeout);
 
-    const [buildingsData, floorsData, spacesData] = await Promise.all([
-      buildingsResponse.json(),
-      floorsResponse.json(),
-      spacesResponse.json(),
-    ]);
+      try {
+        const response = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        return response;
+      } catch (error) {
+        clearTimeout(timeoutId);
+        if (attempts > 1 && error.name === "AbortError") {
+          console.log(
+            `Retrying fetch for ${url}, ${attempts - 1} attempts left`,
+          );
+          return fetchWithTimeout(url, attempts - 1);
+        }
+        throw error;
+      }
+    };
+
+    // Fetch all data with retry logic
+    const endpoints = [
+      "https://navi.jyu.fi/api/buildings",
+      "https://navi.jyu.fi/api/floors",
+      "https://navi.jyu.fi/api/spaces",
+      "https://navi.jyu.fi/api/config",
+    ];
+
+    const responses = await Promise.all(
+      endpoints.map((url) => fetchWithTimeout(url)),
+    ).catch((error) => {
+      throw new Error(`Failed to fetch data: ${error.message}`);
+    });
+
+    const [buildingsData, floorsData, spacesData, configData] =
+      await Promise.all(
+        responses.map(async (response) => {
+          try {
+            return await response.json();
+          } catch (error) {
+            throw new Error(`Failed to parse JSON: ${error.message}`);
+          }
+        }),
+      );
+
+    // Validate received data
+    if (
+      !buildingsData?.items ||
+      !floorsData?.items ||
+      !spacesData?.items ||
+      !configData?.locations
+    ) {
+      throw new Error("Invalid data structure received from API");
+    }
 
     // Store all data
     buildings = buildingsData.items;
@@ -250,22 +353,112 @@ async function fetchBuildings() {
     const validSpaceCategories = ["31", "214", "33"];
     const validExtensionIds = [4200042, 4100003];
 
-    allSpaces = spacesData.items.filter(
-      (space) =>
-        space.rentableArea > 0 &&
-        space.capacity > 0 &&
-        (validSpaceCategories.includes(space.spaceCategory?.custNumber) ||
-          validExtensionIds.includes(space.spaceCategoryExtension?.id)),
+    // Create maps with null checks
+    const locationMap = new Map(
+      (configData.locations || []).map((loc) => [loc.id, loc]),
     );
 
+    const categoryMap = new Map(
+      (configData.spaceCategoryTranslations || []).map((cat) => [cat.id, cat]),
+    );
+
+    // Process buildings with error handling
+    buildings = buildingsData.items
+      .filter((building) => building && building.id) // Filter out invalid buildings
+      .map((building) => {
+        try {
+          const configLocation = locationMap.get(building.id);
+          if (configLocation) {
+            return {
+              ...building,
+              name:
+                configLocation.name?.valueEn ||
+                building.name ||
+                "Unnamed Building",
+              latitude:
+                configLocation.coordinates?.latitude || building.latitude,
+              longitude:
+                configLocation.coordinates?.longitude || building.longitude,
+            };
+          }
+          return building;
+        } catch (error) {
+          console.error(`Error processing building ${building.id}:`, error);
+          return building;
+        }
+      });
+
+    // Enhance spaces with translated categories
+    allSpaces = spacesData.items
+      .map((space) => {
+        const category = categoryMap.get(space.spaceCategory?.custNumber);
+        if (category) {
+          return {
+            ...space,
+            spaceCategory: {
+              ...space.spaceCategory,
+              name: category.name.valueEn,
+            },
+          };
+        }
+        return space;
+      })
+      .filter(
+        (space) =>
+          space.rentableArea > 0 &&
+          space.capacity > 0 &&
+          (validSpaceCategories.includes(space.spaceCategory?.custNumber) ||
+            validExtensionIds.includes(space.spaceCategoryExtension?.id)),
+      );
+
     buildings.sort((a, b) => a.name.localeCompare(b.name));
+
+    // Initialize map
+    if (!map) {
+      map = L.map("map").setView([62.2315, 25.7355], 13); // Centered on Jyväskylä
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "&copy; OpenStreetMap contributors",
+      }).addTo(map);
+    }
+
+    // Clear existing markers
+    currentMarkers.forEach((marker) => marker.remove());
+    currentMarkers = [];
+    selectedMarker = null;
+
+    // Add markers for all buildings
+    buildings.forEach((building) => {
+      if (building.latitude && building.longitude) {
+        const marker = L.marker([building.latitude, building.longitude], {
+          icon: createDefaultIcon(),
+        })
+          .bindPopup(`<b>${building.name}</b><br>${building.campus}`)
+          .addTo(map);
+
+        marker.buildingId = building.id; // Store building ID with marker
+
+        marker.on("click", () => {
+          const selectedCampus = document.getElementById("campusSelect").value;
+          if (!selectedCampus || building.campus === selectedCampus) {
+            document.getElementById("buildingSelect").value = building.id;
+            fetchBuildingData(building.id);
+          }
+        });
+
+        currentMarkers.push(marker);
+      }
+    });
+
+    document.getElementById("mapContainer").classList.remove("hidden");
+    setTimeout(() => map.invalidateSize(), 100);
+    document.getElementById("googleMapsLink").classList.add("hidden");
 
     populateCampusSelect();
     populateBuildingSelect("");
     hideLoading();
   } catch (error) {
     console.error("Error fetching data:", error);
-    showError("Failed to load buildings");
+    showError(`Failed to load buildings: ${error.message}`);
     hideLoading();
   }
 }
@@ -277,7 +470,9 @@ async function fetchBuildingData(buildingId) {
 
     const building = buildings.find((b) => b.id === buildingId);
     const { name, campus, latitude, longitude, address } = building;
-    updateMap(latitude, longitude, name, address);
+
+    // Update map with selected building
+    updateMap(latitude, longitude, name, address, buildingId);
 
     // Filter floors and spaces for the selected building
     const buildingFloors = allFloors.filter(
@@ -485,6 +680,7 @@ function renderSpaces(spacesToRender) {
 document.getElementById("campusSelect").addEventListener("change", (e) => {
   const campus = e.target.value;
   populateBuildingSelect(campus);
+  filterMarkersByCampus(campus);
 });
 
 document.getElementById("buildingSelect").addEventListener("change", (e) => {

@@ -589,7 +589,7 @@ class MapController {
 
       if (visibleMarkers.length > 0) {
         const bounds = L.featureGroup(visibleMarkers).getBounds();
-        AppState.map.fitBounds(bounds, { padding: [5, 5] });
+        AppState.map.fitBounds(bounds, { padding: [8, 8] });
       }
     } else {
       AppState.map.setView(this.defaultCenter, this.defaultZoom);

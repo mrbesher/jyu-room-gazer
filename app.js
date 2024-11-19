@@ -496,7 +496,7 @@ document.getElementById("buildingSelect").addEventListener("change", (e) => {
 
 document.getElementById("searchInput").addEventListener("input", (e) => {
   const searchTerm = e.target.value.toLowerCase();
-  const filteredSpaces = spaces.filter(
+  const searchResults = filteredSpaces.filter(
     (space) =>
       space.name?.toLowerCase().includes(searchTerm) ||
       false ||
@@ -505,7 +505,7 @@ document.getElementById("searchInput").addEventListener("input", (e) => {
       space.spaceCategory?.name?.toLowerCase().includes(searchTerm) ||
       false,
   );
-  renderSpaces(filteredSpaces);
+  renderSpaces(searchResults);
 });
 
 document

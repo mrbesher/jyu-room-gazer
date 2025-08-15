@@ -791,13 +791,54 @@ class UIController {
     buildingSelect.disabled = false;
   }
 
-  static handleCampusSelection(campus) {
+  static async handleCampusSelection(campus) {
     this.populateBuildingSelect(campus);
     mapController.filterMarkersByCampus(campus);
+
+    if (campus) {
+      try {
+        UIUtils.showLoading();
+        UIUtils.hideError();
+
+        const campusBuildings = AppState.buildings.filter(
+          (b) => b.campus === campus,
+        );
+        const buildingFloors = AppState.floors.filter((floor) =>
+          campusBuildings.some((b) => b.id === floor.buildingId),
+        );
+
+        AppState.setState({
+          filteredSpaces: AppState.spaces.filter((space) =>
+            buildingFloors.some((floor) => floor.id === space.floorId),
+          ),
+        });
+
+        this.renderSpaces(AppState.filteredSpaces);
+        document.getElementById("searchContainer").classList.remove("hidden");
+        document.getElementById("checkAvailability").disabled = false;
+      } catch (error) {
+        console.error("Error processing campus selection:", error);
+        UIUtils.showError("Failed to load campus details");
+      } finally {
+        UIUtils.hideLoading();
+      }
+    } else {
+      AppState.setState({ filteredSpaces: [] });
+      document.getElementById("spacesGrid").innerHTML = "";
+      document.getElementById("searchContainer").classList.add("hidden");
+      document.getElementById("checkAvailability").disabled = true;
+    }
   }
 
   static async handleBuildingSelection(buildingId) {
-    if (!buildingId) return;
+    if (!buildingId) {
+      // Revert to campus filtering
+      const selectedCampus = document.getElementById("campusSelect").value;
+      if (selectedCampus) {
+        this.handleCampusSelection(selectedCampus);
+      }
+      return;
+    }
 
     try {
       UIUtils.showLoading();
@@ -858,23 +899,47 @@ class UIController {
     try {
       UIUtils.showLoading();
 
-      const response = await APIService.checkAvailability(
-        AppState.filteredSpaces,
-        date,
-        time,
-        duration,
-      );
-
-      response.availabilityResults.forEach((result) => {
-        const space = AppState.filteredSpaces.find(
-          (s) => s.spaceLabel === result.spaceLabel,
+      // Split spaces into batches of 30
+      for (let i = 0; i < AppState.filteredSpaces.length; i += 30) {
+        const spaceBatch = AppState.filteredSpaces.slice(i, i + 30);
+        const response = await APIService.checkAvailability(
+          spaceBatch,
+          date,
+          time,
+          duration,
         );
-        if (space) {
-          space.isAvailable = result.isAvailable;
-        }
-      });
 
-      this.renderSpaces(AppState.filteredSpaces);
+        response.availabilityResults.forEach((result) => {
+          const space = AppState.filteredSpaces.find(
+            (s) => s.spaceLabel === result.spaceLabel,
+          );
+          if (space) {
+            space.isAvailable = result.isAvailable;
+          }
+        });
+
+        // Immediately recheck null results for this batch
+        const nullSpaces = spaceBatch.filter((s) => s.isAvailable === null);
+        if (nullSpaces.length > 0) {
+          const recheckResponse = await APIService.checkAvailability(
+            nullSpaces,
+            date,
+            time,
+            duration,
+          );
+          recheckResponse.availabilityResults.forEach((result) => {
+            const space = AppState.filteredSpaces.find(
+              (s) => s.spaceLabel === result.spaceLabel,
+            );
+            if (space) {
+              space.isAvailable = result.isAvailable;
+            }
+          });
+        }
+
+        // Update UI after each batch
+        this.renderSpaces(AppState.filteredSpaces);
+      }
     } catch (error) {
       console.error("Error checking availability:", error);
       UIUtils.showError("Failed to check availability");

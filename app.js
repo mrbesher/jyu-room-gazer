@@ -123,6 +123,15 @@ const AppState = {
     document.getElementById("searchInput").placeholder = t.searchSpaces;
     document.getElementById("googleMapsLink").textContent = t.viewOnGoogleMaps;
 
+    // Update BDS link based on language
+    const bdsLink = document.getElementById("bdsLink");
+    if (bdsLink) {
+      bdsLink.href =
+        this.currentLanguage === "fi"
+          ? "https://www.sumud.fi/bds/"
+          : "https://bdsmovement.net/Guide-to-BDS-Boycott";
+    }
+
     // Update legend
     document.querySelectorAll("#colorLegend span").forEach((span, index) => {
       span.textContent = [t.smallCapacity, t.mediumCapacity, t.largeCapacity][

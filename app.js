@@ -682,7 +682,7 @@ class UIController {
     const dateSelect = document.getElementById("dateSelect");
     const today = new Date();
     const maxDate = new Date();
-    maxDate.setDate(today.getDate() + 5);
+    maxDate.setDate(today.getDate() + 90);
 
     dateSelect.min = today.toISOString().split("T")[0];
     dateSelect.max = maxDate.toISOString().split("T")[0];

@@ -33,3 +33,17 @@
     background-color: #f3f4f6;
     color: #374151;
 }
+
+.status-partial {
+    background-color: #fed7aa;
+    color: #9a3412;
+}
+
+/* Orange colors for partial availability */
+.bg-orange-50 {
+    background-color: #fff7ed;
+}
+
+.border-orange-200 {
+    border-color: #fed7aa;
+}

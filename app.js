@@ -18,6 +18,7 @@ const AppState = {
   markers: [],
   selectedMarker: null,
   currentLanguage: getLanguage(),
+  capacityFilter: null, // null, 'small', 'medium', or 'large'
 
   setState(updates) {
     Object.assign(this, updates);
@@ -163,8 +164,10 @@ const Translations = {
     available: "Available for selected time",
     notAvailable: "Not available for selected time",
     checkAvailabilityText: "Check availability",
+    partiallyAvailable: "Partially available",
     capacity: "Capacity",
     area: "Area",
+    timeSlot: "Available time",
     reserve: "Reserve",
     viewOnGoogleMaps: "View on Google Maps",
     duration: "Duration",
@@ -186,8 +189,10 @@ const Translations = {
     available: "Saatavilla valittuna aikana",
     notAvailable: "Ei saatavilla valittuna aikana",
     checkAvailabilityText: "Tarkista saatavuus",
+    partiallyAvailable: "Osittain saatavilla",
     capacity: "Kapasiteetti",
     area: "Pinta-ala",
+    timeSlot: "Saatavilla oleva aika",
     reserve: "Varaa",
     viewOnGoogleMaps: "Näytä Google Mapsissa",
     duration: "Kesto",
@@ -283,6 +288,19 @@ class APIService {
       return response;
     } catch (error) {
       throw new Error(`Failed to check availability: ${error.message}`);
+    }
+  }
+
+  static async fetchAvailableTimes(spaces, date) {
+    try {
+      const response = await this.fetchWithTimeout(`${this.PROXY_URL}/available-times`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ spaces, date }),
+      });
+      return response;
+    } catch (error) {
+      throw new Error(`Failed to fetch available times: ${error.message}`);
     }
   }
 }
@@ -478,6 +496,107 @@ class DataProcessor {
 const UIUtils = {
   formatTime(hours, minutes) {
     return `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}`;
+  },
+
+  // Convert time string to minutes since midnight
+  timeToMinutes(timeStr) {
+    const [hours, minutes] = timeStr.split(":").map(Number);
+    return hours * 60 + minutes;
+  },
+
+  // Convert minutes since midnight to HH:MM string
+  minutesToTime(minutes) {
+    const hours = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    return this.formatTime(hours, mins);
+  },
+
+  // Find continuous time blocks from sorted time slots
+  findContinuousBlocks(timeSlots) {
+    if (!timeSlots || timeSlots.length === 0) return [];
+
+    const blocks = [];
+    let currentBlock = {
+      start: this.timeToMinutes(timeSlots[0]),
+      end: this.timeToMinutes(timeSlots[0]) + 30 // Assume 30-minute slots
+    };
+
+    for (let i = 1; i < timeSlots.length; i++) {
+      const slotMinutes = this.timeToMinutes(timeSlots[i]);
+
+      // Check if this slot continues the current block (30-minute slots)
+      if (slotMinutes === currentBlock.end) {
+        currentBlock.end = slotMinutes + 30;
+      } else {
+        // Save current block and start a new one
+        blocks.push({ ...currentBlock });
+        currentBlock = {
+          start: slotMinutes,
+          end: slotMinutes + 30
+        };
+      }
+    }
+
+    blocks.push(currentBlock);
+    return blocks;
+  },
+
+  // Find the longest continuous block that overlaps with requested time
+  findLongestOverlappingBlock(availableTimes, requestedStartTime, requestedEndTime) {
+    const blocks = this.findContinuousBlocks(availableTimes);
+    const requestedStart = this.timeToMinutes(requestedStartTime);
+    const requestedEnd = this.timeToMinutes(requestedEndTime);
+
+    let longestBlock = null;
+    let maxOverlap = 0;
+
+    for (const block of blocks) {
+      // Check if block overlaps with requested time
+      const overlapStart = Math.max(block.start, requestedStart);
+      const overlapEnd = Math.min(block.end, requestedEnd);
+
+      if (overlapStart < overlapEnd) {
+        const overlapDuration = overlapEnd - overlapStart;
+        if (overlapDuration > maxOverlap) {
+          maxOverlap = overlapDuration;
+          longestBlock = block;
+        }
+      }
+    }
+
+    return longestBlock;
+  },
+
+  // Check if a space is fully available for the requested duration
+  isFullyAvailable(availableTimes, requestedStartTime, requestedEndTime) {
+    const requestedDuration = this.timeToMinutes(requestedEndTime) - this.timeToMinutes(requestedStartTime);
+    const longestBlock = this.findLongestOverlappingBlock(availableTimes, requestedStartTime, requestedEndTime);
+
+    if (!longestBlock) return false;
+
+    // Find the actual available duration during requested time
+    const overlapStart = Math.max(longestBlock.start, this.timeToMinutes(requestedStartTime));
+    const overlapEnd = Math.min(longestBlock.end, this.timeToMinutes(requestedEndTime));
+    const availableDuration = overlapEnd - overlapStart;
+
+    return availableDuration >= requestedDuration;
+  },
+
+  // Check if a space should be partially available or unavailable
+  isPartiallyAvailable(availableTimes, requestedStartTime, requestedEndTime) {
+    const requestedDuration = this.timeToMinutes(requestedEndTime) - this.timeToMinutes(requestedStartTime);
+    const longestBlock = this.findLongestOverlappingBlock(availableTimes, requestedStartTime, requestedEndTime);
+
+    if (!longestBlock) return false;
+
+    // Find the actual available duration during requested time
+    const overlapStart = Math.max(longestBlock.start, this.timeToMinutes(requestedStartTime));
+    const overlapEnd = Math.min(longestBlock.end, this.timeToMinutes(requestedEndTime));
+    const availableDuration = overlapEnd - overlapStart;
+
+    // Room is partially available if available duration is at least three-quarters the requested time OR 30 minutes (whichever is greater)
+    const minimumPartialDuration = Math.max(0.75 * requestedDuration, 30);
+    return availableDuration >= minimumPartialDuration;
   },
 
   getCapacityColor(capacity) {
@@ -682,7 +801,7 @@ class UIController {
     const dateSelect = document.getElementById("dateSelect");
     const today = new Date();
     const maxDate = new Date();
-    maxDate.setDate(today.getDate() + 90);
+    maxDate.setDate(today.getDate() + 5);
 
     dateSelect.min = today.toISOString().split("T")[0];
     dateSelect.max = maxDate.toISOString().split("T")[0];
@@ -760,6 +879,14 @@ class UIController {
     document.getElementById("languageToggle").addEventListener("click", () => {
       AppState.toggleLanguage();
     });
+
+    // Add capacity filter click handlers
+    document.querySelectorAll("#colorLegend [data-capacity]").forEach(element => {
+      element.addEventListener("click", (e) => {
+        const capacity = e.currentTarget.dataset.capacity;
+        this.handleCapacityFilter(capacity);
+      });
+    });
   }
 
   static populateSelects() {
@@ -822,7 +949,7 @@ class UIController {
           ),
         });
 
-        this.renderSpaces(AppState.filteredSpaces);
+        this.applyAllFilters();
         document.getElementById("searchContainer").classList.remove("hidden");
         document.getElementById("checkAvailability").disabled = false;
       } catch (error) {
@@ -866,7 +993,7 @@ class UIController {
         ),
       });
 
-      this.renderSpaces(AppState.filteredSpaces);
+      this.applyAllFilters();
 
       document.getElementById("searchContainer").classList.remove("hidden");
       document.getElementById("checkAvailability").disabled = false;
@@ -882,15 +1009,58 @@ class UIController {
   }
 
   static handleSearch(searchTerm) {
-    const searchResults = AppState.filteredSpaces.filter(
-      (space) =>
-        space.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        space.spaceLabel?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        space.spaceCategory?.name
-          ?.toLowerCase()
-          .includes(searchTerm.toLowerCase()),
-    );
-    this.renderSpaces(searchResults);
+    this.applyAllFilters();
+  }
+
+  static handleCapacityFilter(capacity) {
+    // Toggle filter if clicking the same capacity, otherwise set new filter
+    const newFilter = AppState.capacityFilter === capacity ? null : capacity;
+    AppState.setState({ capacityFilter: newFilter });
+
+    // Update visual styles
+    document.querySelectorAll("#colorLegend [data-capacity]").forEach(el => {
+      el.classList.remove("bg-gray-200", "font-semibold");
+    });
+
+    if (newFilter) {
+      document.querySelector(`#colorLegend [data-capacity="${newFilter}"]`)
+        ?.classList.add("bg-gray-200", "font-semibold");
+    }
+
+    // Apply filters
+    this.applyAllFilters();
+  }
+
+  static applyAllFilters() {
+    let filtered = AppState.filteredSpaces;
+
+    // Apply capacity filter if active
+    if (AppState.capacityFilter) {
+      filtered = filtered.filter(space => {
+        const capacity = space.capacity || 0;
+        switch (AppState.capacityFilter) {
+          case 'small': return capacity < 10;
+          case 'medium': return capacity >= 10 && capacity < 30;
+          case 'large': return capacity >= 30;
+          default: return true;
+        }
+      });
+    }
+
+    // Apply search filter if exists
+    const searchTerm = document.getElementById("searchInput").value;
+    if (searchTerm) {
+      filtered = filtered.filter(
+        (space) =>
+          space.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+          space.spaceLabel?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+          space.spaceCategory?.name
+            ?.toLowerCase()
+            .includes(searchTerm.toLowerCase()),
+      );
+    }
+
+    this.renderSpaces(filtered);
   }
 
   static async handleAvailabilityCheck() {
@@ -905,49 +1075,88 @@ class UIController {
 
     this.validateAndAdjustTime(timeSelect);
 
+    // Calculate end time based on duration
+    const startTimeMinutes = UIUtils.timeToMinutes(time);
+    const endTimeMinutes = startTimeMinutes + parseInt(duration);
+    const endTime = UIUtils.minutesToTime(endTimeMinutes);
+
     try {
       UIUtils.showLoading();
+
+      // Reset all spaces to unknown state
+      AppState.filteredSpaces.forEach(space => {
+        space.isAvailable = null;
+        space.availabilityType = null; // 'full', 'partial', 'none'
+        space.timeSpan = null;
+      });
 
       // Split spaces into batches of 30
       for (let i = 0; i < AppState.filteredSpaces.length; i += 30) {
         const spaceBatch = AppState.filteredSpaces.slice(i, i + 30);
-        const response = await APIService.checkAvailability(
-          spaceBatch,
-          date,
-          time,
-          duration,
-        );
+        const spaceLabels = spaceBatch.map(s => s.spaceLabel).filter(Boolean);
 
-        response.availabilityResults.forEach((result) => {
+        if (spaceLabels.length === 0) continue;
+
+        const response = await APIService.fetchAvailableTimes(spaceLabels, date);
+
+        // Process availability for each space
+        response.availableTimes.forEach((result) => {
           const space = AppState.filteredSpaces.find(
-            (s) => s.spaceLabel === result.spaceLabel,
+            (s) => s.spaceLabel === result.space,
           );
-          if (space) {
-            space.isAvailable = result.isAvailable;
+
+          if (space && result.availableTimes && result.availableTimes.length > 0) {
+            // Check if fully available
+            const isFullyAvailable = UIUtils.isFullyAvailable(
+              result.availableTimes,
+              time,
+              endTime
+            );
+
+              // Find the longest continuous block that overlaps with requested time
+            const longestBlock = UIUtils.findLongestOverlappingBlock(
+              result.availableTimes,
+              time,
+              endTime
+            );
+
+            if (longestBlock) {
+              // Check if the space is fully available for the requested duration
+              if (UIUtils.isFullyAvailable(result.availableTimes, time, endTime)) {
+                space.isAvailable = true;
+                space.availabilityType = 'full';
+                // Store the encapsulating time span for fully available rooms
+                space.timeSpan = {
+                  start: UIUtils.minutesToTime(longestBlock.start),
+                  end: UIUtils.minutesToTime(longestBlock.end)
+                };
+              } else if (UIUtils.isPartiallyAvailable(result.availableTimes, time, endTime)) {
+                space.isAvailable = null; // Use null for partial availability
+                space.availabilityType = 'partial';
+                // Store the encapsulating time span
+                space.timeSpan = {
+                  start: UIUtils.minutesToTime(longestBlock.start),
+                  end: UIUtils.minutesToTime(longestBlock.end)
+                };
+              } else {
+                space.isAvailable = false;
+                space.availabilityType = 'none';
+                space.timeSpan = null;
+              }
+            } else {
+              space.isAvailable = false;
+              space.availabilityType = 'none';
+              space.timeSpan = null;
+            }
+          } else {
+            space.isAvailable = false;
+            space.availabilityType = 'none';
+            space.timeSpan = null;
           }
         });
 
-        // Immediately recheck null results for this batch
-        const nullSpaces = spaceBatch.filter((s) => s.isAvailable === null);
-        if (nullSpaces.length > 0) {
-          const recheckResponse = await APIService.checkAvailability(
-            nullSpaces,
-            date,
-            time,
-            duration,
-          );
-          recheckResponse.availabilityResults.forEach((result) => {
-            const space = AppState.filteredSpaces.find(
-              (s) => s.spaceLabel === result.spaceLabel,
-            );
-            if (space) {
-              space.isAvailable = result.isAvailable;
-            }
-          });
-        }
-
         // Update UI after each batch
-        this.renderSpaces(AppState.filteredSpaces);
+        this.applyAllFilters();
       }
     } catch (error) {
       console.error("Error checking availability:", error);
@@ -976,30 +1185,57 @@ class UIController {
   static renderSpaces(spaces) {
     const t = Translations[AppState.currentLanguage];
     const sortedSpaces = [...spaces].sort((a, b) => {
-      if (a.isAvailable === b.isAvailable) {
+      // Sort by availability: available first, then partial, then unavailable
+      const availabilityOrder = {
+        'full': 0,     // Available (green)
+        'partial': 1,  // Partial (orange)
+        'none': 2,     // Unavailable (red)
+        'null': 3      // Unknown (gray)
+      };
+
+      const aOrder = availabilityOrder[a.availabilityType] ?? 3;
+      const bOrder = availabilityOrder[b.availabilityType] ?? 3;
+
+      if (aOrder === bOrder) {
         return (a.spaceLabel || "").localeCompare(b.spaceLabel || "");
       }
-      return a.isAvailable ? -1 : 1;
+      return aOrder - bOrder;
     });
 
     const grid = document.getElementById("spacesGrid");
     grid.innerHTML = sortedSpaces
       .map(
-        (space) => `
-        <div class="card bg-white rounded-lg overflow-hidden border ${
-          space.isAvailable === true
-            ? "border-green-200"
-            : space.isAvailable === false
-              ? "border-red-200"
-              : "border-gray-200"
-        }">
-          <div class="bg-gray-50 border-b p-4 ${
-            space.isAvailable === true
-              ? "bg-green-50"
-              : space.isAvailable === false
-                ? "bg-red-50"
-                : ""
-          }">
+        (space) => {
+          // Determine card colors based on availability type
+          let borderColor = "border-gray-200";
+          let bgColor = "";
+          let statusClass = "status-unknown";
+          let iconClass = "fa-question";
+          let statusText = t.checkAvailabilityText;
+
+          if (space.availabilityType === 'full') {
+            borderColor = "border-green-200";
+            bgColor = "bg-green-50";
+            statusClass = "status-available";
+            iconClass = "fa-check";
+            statusText = t.available;
+          } else if (space.availabilityType === 'partial') {
+            borderColor = "border-orange-200";
+            bgColor = "bg-orange-50";
+            statusClass = "status-partial";
+            iconClass = "fa-clock";
+            statusText = t.partiallyAvailable;
+          } else if (space.availabilityType === 'none') {
+            borderColor = "border-red-200";
+            bgColor = "bg-red-50";
+            statusClass = "status-unavailable";
+            iconClass = "fa-times";
+            statusText = t.notAvailable;
+          }
+
+          return `
+        <div class="card bg-white rounded-lg overflow-hidden border ${borderColor}">
+          <div class="bg-gray-50 border-b p-4 ${bgColor}">
             <div class="flex items-center justify-between">
               <h3 class="font-semibold overflow-hidden text-ellipsis whitespace-nowrap max-w-[200px]">
                 ${space.spaceLabel || t.unnamedSpace}
@@ -1021,27 +1257,9 @@ class UIController {
             </div>
           </div>
           <div class="p-4 space-y-2">
-            <div class="flex items-center text-sm ${
-              space.isAvailable === true
-                ? "status-available"
-                : space.isAvailable === false
-                  ? "status-unavailable"
-                  : "status-unknown"
-            } p-2 rounded">
-              <i class="fas ${
-                space.isAvailable === true
-                  ? "fa-check"
-                  : space.isAvailable === false
-                    ? "fa-times"
-                    : "fa-question"
-              } mr-2"></i>
-              <span>${
-                space.isAvailable === true
-                  ? t.available
-                  : space.isAvailable === false
-                    ? t.notAvailable
-                    : t.checkAvailabilityText
-              }</span>
+            <div class="flex items-center text-sm ${statusClass} p-2 rounded">
+              <i class="fas ${iconClass} mr-2"></i>
+              <span>${statusText}</span>
             </div>
             ${
               space.spaceCategory?.name || space.spaceCategoryExtension?.name
@@ -1069,6 +1287,23 @@ class UIController {
                 : ""
             }
             ${
+              space.timeSpan
+                ? `
+                <div class="flex items-center text-sm text-gray-600">
+                  <i class="fas fa-clock mr-2"></i>
+                  <span>${t.timeSlot}: ${space.timeSpan.start} - ${space.timeSpan.end}</span>
+                </div>
+                `
+                : space.availabilityType === 'none'
+                  ? `
+                  <div class="flex items-center text-sm text-gray-400">
+                    <i class="fas fa-clock mr-2"></i>
+                    <span>—</span>
+                  </div>
+                  `
+                  : ""
+            }
+            ${
               space.rentableArea > 0
                 ? `
                 <div class="flex items-center text-sm text-gray-600">
@@ -1080,7 +1315,8 @@ class UIController {
             }
           </div>
         </div>
-      `,
+        `;
+        }
       )
       .join("");
   }

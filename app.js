@@ -803,9 +803,9 @@ class UIController {
     const maxDate = new Date();
     maxDate.setDate(today.getDate() + 5);
 
-    dateSelect.min = today.toISOString().split("T")[0];
-    dateSelect.max = maxDate.toISOString().split("T")[0];
-    dateSelect.value = today.toISOString().split("T")[0];
+    dateSelect.min = today.toLocaleDateString("en-CA");
+    dateSelect.max = maxDate.toLocaleDateString("en-CA");
+    dateSelect.value = today.toLocaleDateString("en-CA");
   }
 
   static initializeTimeSelect() {
